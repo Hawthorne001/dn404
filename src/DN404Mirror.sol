@@ -60,10 +60,6 @@ contract DN404Mirror {
     /// does not implement ERC721Receiver.
     error TransferToNonERC721ReceiverImplementer();
 
-    /// @dev Thrown when linking to the DN404 base contract and the
-    /// DN404 supportsInterface check fails or the call reverts.
-    error CannotLink();
-
     /// @dev Thrown when a linkMirrorContract call is received and the
     /// NFT mirror contract has already been linked to a DN404 base contract.
     error AlreadyLinked();
@@ -84,7 +80,7 @@ contract DN404Mirror {
         // Address of the ERC20 base contract.
         address baseERC20;
         // The deployer, if provided. If non-zero, the initialization of the
-        // ERC20 <-> ERC721 link can only be done be the deployer via the ERC20 base contract.
+        // ERC20 <-> ERC721 link can only be done by the deployer via the ERC20 base contract.
         address deployer;
         // The owner of the ERC20 base contract. For marketplace signaling.
         address owner;
@@ -126,7 +122,10 @@ contract DN404Mirror {
     /// @dev Returns the Uniform Resource Identifier (URI) for token `id` from
     /// the base DN404 contract.
     function tokenURI(uint256 id) public view virtual returns (string memory) {
-        return _readString(0xc87b56dd, id); // `tokenURI(uint256)`.
+        ownerOf(id); // `ownerOf` reverts if the token does not exist.
+        // We'll leave if optional for `_tokenURI` to revert for non-existent token
+        // on the ERC20 side, since this is only recommended by the ERC721 standard.
+        return _readString(0xcb30b460, id); // `tokenURINFT(uint256)`.
     }
 
     /// @dev Returns the total NFT supply from the base DN404 contract.
@@ -147,13 +146,13 @@ contract DN404Mirror {
     /// Requirements:
     /// - Token `id` must exist.
     function ownerOf(uint256 id) public view virtual returns (address) {
-        return address(uint160(_readWord(0x6352211e, id, 0))); // `ownerOf(uint256)`.
+        return address(uint160(_readWord(0x2d8a746e, id, 0))); // `ownerOfNFT(uint256)`.
     }
 
     /// @dev Returns the owner of token `id` from the base DN404 contract.
     /// Returns `address(0)` instead of reverting if the token does not exist.
     function ownerAt(uint256 id) public view virtual returns (address) {
-        return address(uint160(_readWord(0x24359879, id, 0))); // `ownerAt(uint256)`.
+        return address(uint160(_readWord(0xc016aa52, id, 0))); // `ownerAtNFT(uint256)`.
     }
 
     /// @dev Sets `spender` as the approved account to manage token `id` in
@@ -197,7 +196,7 @@ contract DN404Mirror {
     /// Requirements:
     /// - Token `id` must exist.
     function getApproved(uint256 id) public view virtual returns (address) {
-        return address(uint160(_readWord(0x081812fc, id, 0))); // `getApproved(uint256)`.
+        return address(uint160(_readWord(0x27ef5495, id, 0))); // `getApprovedNFT(uint256)`.
     }
 
     /// @dev Sets whether `operator` is approved to manage the tokens of the caller in
@@ -210,7 +209,7 @@ contract DN404Mirror {
         assembly {
             operator := shr(96, shl(96, operator))
             let m := mload(0x40)
-            mstore(0x00, 0x813500fc) // `setApprovalForAll(address,bool,address)`.
+            mstore(0x00, 0xf6916ddd) // `setApprovalForAllNFT(address,bool,address)`.
             mstore(0x20, operator)
             mstore(0x40, iszero(iszero(approved)))
             mstore(0x60, caller())
@@ -239,8 +238,8 @@ contract DN404Mirror {
         virtual
         returns (bool)
     {
-        // `isApprovedForAll(address,address)`.
-        return _readWord(0xe985e9c5, uint160(nftOwner), uint160(operator)) != 0;
+        // `isApprovedForAllNFT(address,address)`.
+        return _readWord(0x62fb246d, uint160(nftOwner), uint160(operator)) != 0;
     }
 
     /// @dev Transfers token `id` from `from` to `to`.
@@ -281,8 +280,12 @@ contract DN404Mirror {
 
     /// @dev Equivalent to `safeTransferFrom(from, to, id, "")`.
     function safeTransferFrom(address from, address to, uint256 id) public payable virtual {
-        transferFrom(from, to, id);
-        if (_hasCode(to)) _checkOnERC721Received(from, to, id, "");
+        bytes calldata emptyData;
+        /// @solidity memory-safe-assembly
+        assembly {
+            emptyData.length := 0
+        }
+        safeTransferFrom(from, to, id, emptyData);
     }
 
     /// @dev Transfers token `id` from `from` to `to`.
@@ -303,7 +306,34 @@ contract DN404Mirror {
         virtual
     {
         transferFrom(from, to, id);
-        if (_hasCode(to)) _checkOnERC721Received(from, to, id, data);
+        /// @solidity memory-safe-assembly
+        assembly {
+            if extcodesize(to) {
+                // Prepare the calldata.
+                let m := mload(0x40)
+                let onERC721ReceivedSelector := 0x150b7a02
+                mstore(m, onERC721ReceivedSelector)
+                mstore(add(m, 0x20), caller()) // The `operator`, which is always `msg.sender`.
+                mstore(add(m, 0x40), shr(96, shl(96, from)))
+                mstore(add(m, 0x60), id)
+                mstore(add(m, 0x80), 0x80)
+                mstore(add(m, 0xa0), data.length)
+                calldatacopy(add(m, 0xc0), data.offset, data.length)
+                // Revert if the call reverts.
+                if iszero(call(gas(), to, 0, add(m, 0x1c), add(data.length, 0xa4), m, 0x20)) {
+                    if returndatasize() {
+                        // Bubble up the revert if the call reverts.
+                        returndatacopy(m, 0x00, returndatasize())
+                        revert(m, returndatasize())
+                    }
+                }
+                // Load the returndata and compare it.
+                if iszero(eq(mload(m), shl(224, onERC721ReceivedSelector))) {
+                    mstore(0x00, 0xd1a57ed6) // `TransferToNonERC721ReceiverImplementer()`.
+                    revert(0x1c, 0x04)
+                }
+            }
+        }
     }
 
     /// @dev Returns true if this contract implements the interface defined by `interfaceId`.
@@ -332,9 +362,10 @@ contract DN404Mirror {
     function pullOwner() public virtual returns (bool) {
         address newOwner;
         address base = baseERC20();
+        uint32 baseOwnerFunctionSelector = uint32(_baseOwnerFunctionSelector());
         /// @solidity memory-safe-assembly
         assembly {
-            mstore(0x00, 0x8da5cb5b) // `owner()`.
+            mstore(0x00, baseOwnerFunctionSelector)
             let success := staticcall(gas(), base, 0x1c, 0x04, 0x00, 0x20)
             newOwner := mul(shr(96, mload(0x0c)), and(gt(returndatasize(), 0x1f), success))
         }
@@ -347,6 +378,11 @@ contract DN404Mirror {
         return true;
     }
 
+    /// @dev Override to allow for a different function selector on `baseERC20`.
+    function _baseOwnerFunctionSelector() internal view virtual returns (bytes4) {
+        return 0x8da5cb5b; // `owner()`.
+    }
+
     /*«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-«-*/
     /*                     MIRROR OPERATIONS                      */
     /*-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»-»*/
@@ -354,7 +390,7 @@ contract DN404Mirror {
     /// @dev Returns the address of the base DN404 contract.
     function baseERC20() public view virtual returns (address base) {
         base = _getDN404NFTStorage().baseERC20;
-        if (base == address(0)) revert NotLinked();
+        if (base == address(0)) _rv(uint32(NotLinked.selector));
     }
 
     /// @dev Fallback modifier to execute calls from the base DN404 contract.
@@ -365,7 +401,7 @@ contract DN404Mirror {
 
         // `logTransfer(uint256[])`.
         if (fnSelector == 0x263c69d6) {
-            if (msg.sender != $.baseERC20) revert SenderNotBase();
+            if (msg.sender != $.baseERC20) _rv(uint32(SenderNotBase.selector));
             /// @solidity memory-safe-assembly
             assembly {
                 let o := add(0x24, calldataload(0x04)) // Packed logs offset.
@@ -389,7 +425,7 @@ contract DN404Mirror {
         }
         // `logDirectTransfer(address,address,uint256[])`.
         if (fnSelector == 0x144027d3) {
-            if (msg.sender != $.baseERC20) revert SenderNotBase();
+            if (msg.sender != $.baseERC20) _rv(uint32(SenderNotBase.selector));
             /// @solidity memory-safe-assembly
             assembly {
                 let from := calldataload(0x04)
@@ -407,10 +443,10 @@ contract DN404Mirror {
         if (fnSelector == 0x0f4599e5) {
             if ($.deployer != address(0)) {
                 if (address(uint160(_calldataload(0x04))) != $.deployer) {
-                    revert SenderNotDeployer();
+                    _rv(uint32(SenderNotDeployer.selector));
                 }
             }
-            if ($.baseERC20 != address(0)) revert AlreadyLinked();
+            if ($.baseERC20 != address(0)) _rv(uint32(AlreadyLinked.selector));
             $.baseERC20 = msg.sender;
             /// @solidity memory-safe-assembly
             assembly {
@@ -426,7 +462,7 @@ contract DN404Mirror {
     /// fallback with utilities like Solady's `LibZip.cdFallback()`.
     /// And always remember to always wrap the fallback with `dn404NFTFallback`.
     fallback() external payable virtual dn404NFTFallback {
-        revert FnSelectorNotRecognized(); // Not mandatory. Just for quality of life.
+        _rv(uint32(FnSelectorNotRecognized.selector)); // Not mandatory. Just for quality of life.
     }
 
     /// @dev This is to silence the compiler warning.
@@ -499,45 +535,12 @@ contract DN404Mirror {
         }
     }
 
-    /// @dev Returns if `a` has bytecode of non-zero length.
-    function _hasCode(address a) private view returns (bool result) {
+    /// @dev More bytecode-efficient way to revert.
+    function _rv(uint32 s) private pure {
         /// @solidity memory-safe-assembly
         assembly {
-            result := extcodesize(a) // Can handle dirty upper bits.
-        }
-    }
-
-    /// @dev Perform a call to invoke {IERC721Receiver-onERC721Received} on `to`.
-    /// Reverts if the target does not support the function correctly.
-    function _checkOnERC721Received(address from, address to, uint256 id, bytes memory data)
-        private
-    {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Prepare the calldata.
-            let m := mload(0x40)
-            let onERC721ReceivedSelector := 0x150b7a02
-            mstore(m, onERC721ReceivedSelector)
-            mstore(add(m, 0x20), caller()) // The `operator`, which is always `msg.sender`.
-            mstore(add(m, 0x40), shr(96, shl(96, from)))
-            mstore(add(m, 0x60), id)
-            mstore(add(m, 0x80), 0x80)
-            let n := mload(data)
-            mstore(add(m, 0xa0), n)
-            if n { pop(staticcall(gas(), 4, add(data, 0x20), n, add(m, 0xc0), n)) }
-            // Revert if the call reverts.
-            if iszero(call(gas(), to, 0, add(m, 0x1c), add(n, 0xa4), m, 0x20)) {
-                if returndatasize() {
-                    // Bubble up the revert if the call reverts.
-                    returndatacopy(m, 0x00, returndatasize())
-                    revert(m, returndatasize())
-                }
-            }
-            // Load the returndata and compare it.
-            if iszero(eq(mload(m), shl(224, onERC721ReceivedSelector))) {
-                mstore(0x00, 0xd1a57ed6) // `TransferToNonERC721ReceiverImplementer()`.
-                revert(0x1c, 0x04)
-            }
+            mstore(0x00, s)
+            revert(0x1c, 0x04)
         }
     }
 }

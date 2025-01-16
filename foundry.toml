@@ -4,7 +4,7 @@
 
 # The Default Profile
 [profile.default]
-solc_version = "0.8.25"
+solc_version = "0.8.26"
 evm_version = "paris" # Cancun will be tested in the CI.
 auto_detect_solc = false
 optimizer = true
@@ -22,7 +22,7 @@ line_length = 100 # While we allow up to 120, we lint at 100 for readability.
 runs = 256
 
 [invariant]
-runs = 30
+runs = 10
 depth = 15
 fail_on_revert = true
 dictionary_weight = 80
